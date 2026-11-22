@@ -1,14 +1,19 @@
 package com.corretor.teclado
 
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
-import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -20,55 +25,35 @@ class CorretorIME : InputMethodService() {
 
     private val main = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor()
-    private val letters = ArrayList<Button>()
+    private val letterKeys = ArrayList<TextView>()
+    private var root: LinearLayout? = null
+    private var shiftKey: TextView? = null
+    private var autoKey: TextView? = null
+    private var fixKey: TextView? = null
+    private var repeatTask: Runnable? = null
     private var shift = false
+    private var symbols = false
     private var auto = true
-    private var autoBtn: Button? = null
-    private var fixBtn: Button? = null
 
     override fun onCreateInputView(): View {
-        val root = LinearLayout(this)
-        root.orientation = LinearLayout.VERTICAL
-        root.setBackgroundColor(0xFF202124.toInt())
-        root.setPadding(dp(3), dp(6), dp(3), dp(6))
-        letters.clear()
-
-        for (line in listOf("1234567890", "qwertyuiop", "asdfghjklç")) {
-            val row = newRow()
-            for (c in line) row.addView(letterKey(c.toString()))
-            root.addView(row)
-        }
-
-        val r4 = newRow()
-        r4.addView(key("⇧", 1.5f) { toggleShift() })
-        for (c in "zxcvbnm") r4.addView(letterKey(c.toString()))
-        r4.addView(key("⌫", 1.5f) { sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL) })
-        root.addView(r4)
-
-        val r5 = newRow()
-        r5.addView(key(",", 0.9f) { typeKey(",") })
-        r5.addView(key("?", 0.9f) { typeKey("?") })
-        r5.addView(key("espaço", 2.4f) { typeKey(" ") })
-        r5.addView(key(".", 0.9f) { typeKey(".") })
-        r5.addView(key("!", 0.9f) { typeKey("!") })
-        val a = key("Auto ✓", 1.6f) { toggleAuto() }
-        a.textSize = 12f
-        autoBtn = a
-        r5.addView(a)
-        val f = key("✨", 1.4f) { correct() }
-        fixBtn = f
-        r5.addView(f)
-        r5.addView(key("⏎", 1.2f) {
-            if (!sendDefaultEditorAction(true)) sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
-        })
-        root.addView(r5)
-        return root
+        val c = LinearLayout(this)
+        c.orientation = LinearLayout.VERTICAL
+        c.setBackgroundColor(0xFF202124.toInt())
+        c.setPadding(dp(3), dp(4), dp(3), dp(10))
+        root = c
+        buildKeys()
+        return c
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         shift = false
-        refreshLabels()
+        if (symbols) {
+            symbols = false
+            buildKeys()
+        } else {
+            refreshLabels()
+        }
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -79,28 +64,143 @@ class CorretorIME : InputMethodService() {
         return row
     }
 
-    private fun key(label: String, weight: Float = 1f, onClick: () -> Unit): Button {
-        val b = Button(this)
-        b.text = label
-        b.isAllCaps = false
-        b.textSize = 18f
-        b.setTextColor(0xFFFFFFFF.toInt())
-        b.setBackgroundColor(0xFF3C4043.toInt())
-        b.minWidth = 0
-        b.minimumWidth = 0
-        b.setPadding(0, 0, 0, 0)
-        val lp = LinearLayout.LayoutParams(0, dp(48), weight)
-        lp.setMargins(dp(2), dp(3), dp(2), dp(3))
-        b.layoutParams = lp
-        b.setOnClickListener { onClick() }
-        return b
+    private fun spacer(weight: Float): View {
+        val v = View(this)
+        v.layoutParams = LinearLayout.LayoutParams(0, dp(52), weight)
+        return v
     }
 
-    private fun letterKey(base: String): Button {
-        val b = key(base) { typeKey(base) }
-        b.tag = base
-        if (base[0].isLetter()) letters.add(b)
-        return b
+    private fun keyBg(special: Boolean, pressed: Boolean): GradientDrawable {
+        val d = GradientDrawable()
+        d.cornerRadius = dp(8).toFloat()
+        val color = if (pressed) 0xFF6B6E73.toInt()
+        else if (special) 0xFF2E3033.toInt()
+        else 0xFF45484C.toInt()
+        d.setColor(color)
+        return d
+    }
+
+    private fun makeKey(
+        label: String,
+        weight: Float,
+        special: Boolean,
+        size: Float,
+        repeat: Boolean,
+        onPress: () -> Unit
+    ): TextView {
+        val t = TextView(this)
+        t.text = label
+        t.gravity = Gravity.CENTER
+        t.setTextColor(Color.WHITE)
+        t.textSize = size
+        t.background = keyBg(special, false)
+        val lp = LinearLayout.LayoutParams(0, dp(52), weight)
+        lp.setMargins(dp(2), dp(3), dp(2), dp(3))
+        t.layoutParams = lp
+        t.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    v.background = keyBg(special, true)
+                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    onPress()
+                    if (repeat) startRepeat(onPress)
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.background = keyBg(special, false)
+                    stopRepeat()
+                    true
+                }
+                else -> true
+            }
+        }
+        return t
+    }
+
+    private fun startRepeat(action: () -> Unit) {
+        stopRepeat()
+        val r = object : Runnable {
+            override fun run() {
+                action()
+                main.postDelayed(this, 50)
+            }
+        }
+        repeatTask = r
+        main.postDelayed(r, 400)
+    }
+
+    private fun stopRepeat() {
+        val r = repeatTask
+        if (r != null) main.removeCallbacks(r)
+        repeatTask = null
+    }
+
+    private fun charKey(base: String): TextView {
+        val k = makeKey(base, 1f, false, 20f, false) { typeKey(base) }
+        k.tag = base
+        if (base[0].isLetter()) letterKeys.add(k)
+        return k
+    }
+
+    private fun charRow(chars: String): LinearLayout {
+        val row = newRow()
+        for (c in chars) row.addView(charKey(c.toString()))
+        return row
+    }
+
+    private fun buildKeys() {
+        val r = root ?: return
+        r.removeAllViews()
+        letterKeys.clear()
+        shiftKey = null
+
+        val bar = newRow()
+        val a = makeKey(if (auto) "Auto ✓" else "Auto ✗", 1f, true, 14f, false) { toggleAuto() }
+        autoKey = a
+        bar.addView(a)
+        val f = makeKey("✨ Corrigir", 1f, true, 14f, false) { correct() }
+        fixKey = f
+        bar.addView(f)
+        r.addView(bar)
+
+        r.addView(charRow("1234567890"))
+        if (!symbols) {
+            r.addView(charRow("qwertyuiop"))
+            r.addView(charRow("asdfghjklç"))
+            val r4 = newRow()
+            val s = makeKey("⇧", 1.5f, true, 20f, false) { toggleShift() }
+            shiftKey = s
+            r4.addView(s)
+            for (c in "zxcvbnm") r4.addView(charKey(c.toString()))
+            r4.addView(makeKey("⌫", 1.5f, true, 20f, true) { del() })
+            r.addView(r4)
+        } else {
+            r.addView(charRow("@#\$%&-+()/"))
+            r.addView(charRow("*\"':;!?_=~"))
+            val r4 = newRow()
+            r4.addView(spacer(1.5f))
+            for (c in "<>[]{}|") r4.addView(charKey(c.toString()))
+            r4.addView(makeKey("⌫", 1.5f, true, 20f, true) { del() })
+            r.addView(r4)
+        }
+
+        val b = newRow()
+        b.addView(makeKey(if (symbols) "ABC" else "?123", 1.5f, true, 14f, false) { toggleSymbols() })
+        b.addView(charKey(","))
+        b.addView(makeKey("Português (BR)", 5f, false, 14f, false) { typeKey(" ") })
+        b.addView(charKey("."))
+        b.addView(makeKey("⏎", 1.5f, true, 20f, false) { enter() })
+        r.addView(b)
+
+        refreshLabels()
+    }
+
+    private fun refreshLabels() {
+        for (k in letterKeys) {
+            val base = k.tag as String
+            k.text = if (shift) base.uppercase() else base
+        }
+        shiftKey?.setTextColor(if (shift) 0xFF8AB4F8.toInt() else Color.WHITE)
     }
 
     private fun toggleShift() {
@@ -108,16 +208,22 @@ class CorretorIME : InputMethodService() {
         refreshLabels()
     }
 
-    private fun refreshLabels() {
-        for (b in letters) {
-            val base = b.tag as String
-            b.text = if (shift) base.uppercase() else base
-        }
+    private fun toggleSymbols() {
+        symbols = !symbols
+        buildKeys()
     }
 
     private fun toggleAuto() {
         auto = !auto
-        autoBtn?.text = if (auto) "Auto ✓" else "Auto ✗"
+        autoKey?.text = if (auto) "Auto ✓" else "Auto ✗"
+    }
+
+    private fun del() {
+        sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+    }
+
+    private fun enter() {
+        if (!sendDefaultEditorAction(true)) sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
     }
 
     private fun typeKey(s: String) {
@@ -148,7 +254,7 @@ class CorretorIME : InputMethodService() {
         val ic = currentInputConnection ?: return
         val before = ic.getTextBeforeCursor(300, 0)?.toString() ?: return
         if (before.isBlank()) return
-        fixBtn?.text = "⏳"
+        fixKey?.text = "⏳"
         executor.execute {
             val fixed = try { checkText(before) } catch (e: Exception) { null }
             main.post { applyFix(before, fixed) }
@@ -156,7 +262,7 @@ class CorretorIME : InputMethodService() {
     }
 
     private fun applyFix(before: String, fixed: String?) {
-        fixBtn?.text = "✨"
+        fixKey?.text = "✨ Corrigir"
         if (fixed == null) {
             Toast.makeText(this, "Não consegui corrigir (internet?)", Toast.LENGTH_SHORT).show()
             return
